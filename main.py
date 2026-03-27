@@ -32,10 +32,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-
-# ---------------------------------------------------------------------------
-# 1. List all DMI stations
-# ---------------------------------------------------------------------------
+# Get list of dmi stations
 @app.get(
     "/dmi/stations/",
     response_model=List[int],
@@ -44,16 +41,50 @@ app = FastAPI(
 )
 async def get_dmi_stations(db: DBSessionDep):
     """Returns a list of all unique DMI station IDs in the database."""
+    # SELECT DISTINCT station_id FROM "DMI"
     result = await db.execute(select(DMI.station_id).distinct())
     station_ids = result.scalars().all()
     if not station_ids:
         raise HTTPException(status_code=404, detail="No stations found.")
     return station_ids
 
+# get latest measurment for dmi station
+@app.get(
+    "/dmi/latest/",
+    response_model=List[DMIBase],
+    summary="Latest measurement from each DMI station",
+    tags=["DMI"],
+)
+async def get_latest_dmi_measurements(db: DBSessionDep):
+    """Returns the single most recent measurement from each DMI station."""
+    # SELECT "DMI".*
+    # FROM "DMI"
+    # JOIN (
+    #     SELECT station_id, MAX(observed_at) AS max_observed_at
+    #     FROM "DMI"
+    #     GROUP BY station_id
+    # ) AS subquery
+    # ON "DMI".station_id = subquery.station_id
+    # AND "DMI".observed_at = subquery.max_observed_at;
+    subquery = (
+        select(DMI.station_id, func.max(DMI.observed_at).label("max_observed_at"))
+        .group_by(DMI.station_id)
+        .subquery()
+    )
+    query = select(DMI).join(
+        subquery,
+        and_(
+            DMI.station_id == subquery.c.station_id,
+            DMI.observed_at == subquery.c.max_observed_at,
+        ),
+    )
+    result = await db.execute(query)
+    measurements = result.scalars().all()
+    if not measurements:
+        raise HTTPException(status_code=404, detail="No DMI measurements found.")
+    return measurements
 
-# ---------------------------------------------------------------------------
-# 2. Measurements for one DMI station, with optional filters
-# ---------------------------------------------------------------------------
+# Get meaurment for one station
 @app.get(
     "/dmi/{station_id}/",
     response_model=List[DMIBase],
@@ -72,8 +103,14 @@ async def get_dmi_station_measurements(
 ):
     """
     Returns all measurements for a single DMI station.
-    Optionally filter by date range and/or measurement type.
+    
     """
+# SELECT * FROM "DMI"
+# WHERE station_id = 06180
+#   AND observed_at >= '2024-01-01'
+#   AND observed_at <= '2024-01-31'
+#   AND parameter_id = 'temp_dry'
+# ORDER BY observed_at DESC;
     # Validate type parameter if provided
     valid_types = {"temp_dry", "humidity", "pressure"}
     if type is not None and type not in valid_types:
@@ -103,40 +140,8 @@ async def get_dmi_station_measurements(
         )
     return measurements
 
+# sensor readings (BME280, DS18B20, SCD41)
 
-# ---------------------------------------------------------------------------
-# 3. Latest measurement per DMI station
-# ---------------------------------------------------------------------------
-@app.get(
-    "/dmi/latest/",
-    response_model=List[DMIBase],
-    summary="Latest measurement from each DMI station",
-    tags=["DMI"],
-)
-async def get_latest_dmi_measurements(db: DBSessionDep):
-    """Returns the single most recent measurement from each DMI station."""
-    subquery = (
-        select(DMI.station_id, func.max(DMI.observed_at).label("max_observed_at"))
-        .group_by(DMI.station_id)
-        .subquery()
-    )
-    query = select(DMI).join(
-        subquery,
-        and_(
-            DMI.station_id == subquery.c.station_id,
-            DMI.observed_at == subquery.c.max_observed_at,
-        ),
-    )
-    result = await db.execute(query)
-    measurements = result.scalars().all()
-    if not measurements:
-        raise HTTPException(status_code=404, detail="No DMI measurements found.")
-    return measurements
-
-
-# ---------------------------------------------------------------------------
-# 4. Latest sensor reading per location (BME280, DS18B20, SCD41)
-# ---------------------------------------------------------------------------
 @app.get(
     "/sensors/latest/",
     summary="Latest reading from each local sensor",
@@ -147,7 +152,18 @@ async def get_latest_sensor_readings(db: DBSessionDep):
     Returns the most recent reading from each sensor type and location.
     Covers BME280, DS18B20 (inside/outside), and SCD41.
     """
+# SELECT "BME280".*
+# FROM "BME280"
+# JOIN (
+#     SELECT location, MAX(observed_at) AS max_ts
+#     FROM "BME280"
+#     GROUP BY location
+# ) AS sub
+# ON "BME280".location = sub.location
+# AND "BME280".observed_at = sub.max_ts;
 
+#SELECT * FROM "SCD41"
+#WHERE observed_at = (SELECT MAX(observed_at) FROM "SCD41");
     async def latest_for(model, has_location: bool):
         if has_location:
             sub = (
@@ -177,9 +193,8 @@ async def get_latest_sensor_readings(db: DBSessionDep):
     }
 
 
-# ---------------------------------------------------------------------------
-# 5. Cross-source comparison — temperature across all sources
-# ---------------------------------------------------------------------------
+# get comapison of temperature
+
 @app.get(
     "/compare/temperature/",
     summary="Compare temperature readings across all sources",
@@ -194,19 +209,52 @@ async def compare_temperature(
     Returns temperature readings from DMI, BME280, DS18B20, and SCD41
     for the given date range. At least one date filter is required.
     """
+# -- DMI (correct version, second query)
+# SELECT dmi_id, observed_at, value AS temperature, station_id
+# FROM "DMI"
+# WHERE parameter_id = 'temp_dry'
+#   AND observed_at >= '2024-01-01'
+#   AND observed_at <= '2024-01-31'
+# ORDER BY observed_at DESC;
+
+# -- BME280
+# SELECT reader_id, observed_at, temperature, location
+# FROM "BME280"
+# WHERE observed_at >= '2024-01-01'
+#   AND observed_at <= '2024-01-31'
+# ORDER BY observed_at DESC
+# LIMIT 1000;
+
+# -- DS18B20
+# SELECT reader_id, observed_at, temperature, location
+# FROM "DS18B20"
+# WHERE observed_at >= '2024-01-01'
+#   AND observed_at <= '2024-01-31'
+# ORDER BY observed_at DESC
+# LIMIT 1000;
+
+# -- SCD41
+# SELECT reader_id, observed_at, temperature
+# FROM "SCD41"
+# WHERE observed_at >= '2024-01-01'
+#   AND observed_at <= '2024-01-31'
+# ORDER BY observed_at DESC
+# LIMIT 1000;
+    
     if not (from_date or to_date):
         raise HTTPException(
             status_code=400,
             detail="At least one of from_date or to_date is required.",
         )
-
+        # Shared helper for BME280, DS18B20, SCD41
     async def query_temp(model, temp_col, extra_cols: dict):
         q = select(model).where(model.observed_at != None)
+        
         if from_date:
             q = q.where(model.observed_at >= from_date)
         if to_date:
             q = q.where(model.observed_at <= to_date)
-        q = q.order_by(desc(model.observed_at))
+        q = q.order_by(desc(model.observed_at)).limit(1000)
         res = await db.execute(q)
         rows = res.scalars().all()
         return [
@@ -219,13 +267,7 @@ async def compare_temperature(
             for r in rows
         ]
 
-    dmi_rows    = await query_temp(DMI,    "value",       {"station_id": "station_id"})
-    bme_rows    = await query_temp(BME280, "temperature", {"location": "location"})
-    ds_rows     = await query_temp(DS18B20,"temperature", {"location": "location"})
-    scd_rows    = await query_temp(SCD41,  "temperature", {})
-
-    # Filter DMI to only temperature rows
-    dmi_rows = [r for r in dmi_rows if r.get("station_id") and True]  # already filtered below
+    # DMI needs parameter_id filter so it gets its own query
     dmi_temp_q = (
         select(DMI)
         .where(DMI.parameter_id == "temp_dry")
@@ -234,7 +276,7 @@ async def compare_temperature(
         dmi_temp_q = dmi_temp_q.where(DMI.observed_at >= from_date)
     if to_date:
         dmi_temp_q = dmi_temp_q.where(DMI.observed_at <= to_date)
-    dmi_temp_q = dmi_temp_q.order_by(desc(DMI.observed_at))
+    dmi_temp_q = dmi_temp_q.order_by(desc(DMI.observed_at)).limit(1000)
     dmi_res = await db.execute(dmi_temp_q)
     dmi_rows = [
         {
@@ -245,6 +287,9 @@ async def compare_temperature(
         }
         for r in dmi_res.scalars().all()
     ]
+    bme_rows = await query_temp(BME280,  "temperature", {"location": "location"})
+    ds_rows  = await query_temp(DS18B20, "temperature", {"location": "location"})
+    scd_rows = await query_temp(SCD41,   "temperature", {})
 
     return {
         "DMI":     dmi_rows,

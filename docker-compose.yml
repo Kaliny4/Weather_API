@@ -1,0 +1,81 @@
+services:
+  init-db:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -c "from db_code.app.load.create_tables import create_all_tables; create_all_tables()"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:qwerty@postgres:5432/weather
+      PYTHONPATH: /Weather_API
+    volumes:
+      - ./:/Weather_API:cached
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+  postgres:
+    image: postgres:16
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: qwerty
+      POSTGRES_DB: weather
+    ports:
+      - 5432:5432
+    expose:
+      - "5432"
+    volumes:
+      - db-data:/var/lib/postgresql/data:cached
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d weather"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+
+  app:
+    restart: on-failure
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python main.py
+    volumes:
+      - ./:/Weather_API:cached
+    environment:
+      PYTHONPATH: .
+      DATABASE_URL: postgresql+asyncpg://postgres:qwerty@postgres:5432/weather
+  
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  etl:
+    restart: on-failure
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -c "from db_code.app.pipeline.etl import ETLProcess; ETLProcess(docker=True).docker_etl_background(interval_minutes=10)"
+    working_dir: /Weather_API/db_code    # ← etl_times.json will be read/written here
+    volumes:
+      - ./:/Weather_API:cached
+    environment:
+      OPENSSL_CONF: /dev/null   # disables strict OpenSSL policy
+      PYTHONPATH: /Weather_API            # ← so "db_code.app.xxx" resolves
+      DOCKER: "True"
+      DB_NAME: weather
+      DB_USER: postgres
+      DB_PASSWORD: qwerty
+      DB_HOST: postgres
+      SPEC_TOKEN: ${SPEC_TOKEN}
+      NEW_SPEC_TOKEN: ${NEW_SPEC_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_started
+    ports:
+      - "5433:5432"
+volumes:
+  db-data:
