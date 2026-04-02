@@ -13,15 +13,26 @@ from database import get_db_session, sessionmanager
 from models.classes_alchemy import DMI, BME280, DS18B20, SCD41
 from models.classes_schema import DMIBase, BME280Base, DS18B20Base, SCD41Base
 
+from db_code.app.pipeline.etl import ETLProcess
+from db_code.app.load.db.initialize import DatabaseInitializer
+from db_code.app.config import docker
+import os
+
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 DBSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.info("Starting up app...")
+    initializer = DatabaseInitializer(docker=docker)
+    initializer.create_db()
+    initializer.initialize_db()
+    logger.info("Database initialized.")
     yield
-    if sessionmanager._engine is not None:
+    if getattr(sessionmanager, "_engine", None) is not None:
         await sessionmanager.close()
 
 
@@ -29,8 +40,9 @@ app = FastAPI(
     lifespan=lifespan,
     title="Weather API",
     description="Read-only API for weather measurements from DMI and local sensors.",
-    version="1.0.0",
+    #version="1.0.0",
 )
+
 
 # Get list of dmi stations
 @app.get(
@@ -300,4 +312,4 @@ async def compare_temperature(
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", reload=True, port=8000)
+    uvicorn.run("main:app", host="0.0.0.0" if docker else "127.0.0.1", port=8000, reload=True)
